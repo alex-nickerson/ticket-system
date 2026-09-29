@@ -1,8 +1,7 @@
-# ticket-system
+# ticket-system WIP
 
 A small ServiceNow-style IT service desk: Spring Boot REST API, Angular frontend,
-PostgreSQL, deployed to Azure. See [CLAUDE.md](CLAUDE.md) for the full spec, scope
-and build order.
+PostgreSQL, deployed to Azure.
 
 Status: **milestone 0 — project setup.** The skeleton builds, tests and boots; there
 are no ticket endpoints yet.
@@ -79,17 +78,3 @@ functions/   Azure Functions for notifications  (milestone 9)
 infra/       Azure deployment notes             (milestone 5)
 docs/        Decision log, architecture notes
 ```
-
-## Notes for contributors
-
-- **Secrets never go in the repository.** Local values live in `.env`, which is
-  git-ignored; production secrets live in Azure Key Vault. A `gitleaks` scan runs on
-  every pull request.
-- **`main` stays green.** Work on a branch and open a pull request. Note that with the
-  current triggers, *pushing a branch does not start CI* — opening the pull request
-  does.
-- **Never merge a red pull request, including Dependabot's.** Dependabot proposes
-  upgrades without checking whether the rest of the ecosystem supports them.
-- **TypeScript is pinned to Angular's supported range** and is upgraded only when
-  Angular is. `.github/dependabot.yml` ignores its major and minor updates for that
-  reason.
