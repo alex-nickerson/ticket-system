@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: "maven"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    ignore:
+      # Angular supports only a narrow TypeScript range (Angular 22 requires
+      # >=6.0 <6.1). TypeScript is upgraded when Angular is upgraded, never
+      # independently — an unattended major or minor bump makes the frontend
+      # unbuildable. Patch updates stay allowed.
+      - dependency-name: "typescript"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
