@@ -1,0 +1,29 @@
+# Secrets — never commit these. Copy .env.example to .env for local values.
+.env
+.env.local
+*.pem
+*.key
+
+# Java / Maven
+target/
+*.class
+
+# Node / Angular
+node_modules/
+dist/
+.angular/
+coverage/
+*.tsbuildinfo
+
+# IDE
+.idea/
+*.iml
+.vscode/*
+!.vscode/extensions.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
