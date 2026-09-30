@@ -122,3 +122,113 @@ request. Running it in CI rather than as a local hook means it cannot be skipped
 - **Lombok** is not used at all. The domain objects are Java records and small
   entities, and Lombok's annotation processing is a debugging cost with little to
   show for it here.
+
+## Milestone 1 — tickets core
+
+### Users exist before authentication does
+
+`users` is created and seeded in this milestone even though sign-in is milestone
+2, because a ticket's requester and assignee are foreign keys and there is no
+honest way to model a ticket without them. The seeded rows are development
+identities, one per role; milestone 2 attaches real `entra_object_id` values to
+them rather than replacing them.
+
+### The acting user is a header, isolated behind one interface
+
+There is no authentication yet, so the API has to be told who is acting. It reads
+an `X-Acting-User` header holding a user id. That is obviously not security —
+anyone can claim to be anyone — and it is temporary.
+
+What makes it acceptable is that nothing outside `HeaderActingUserProvider` knows
+about it. Callers depend on the `ActingUserProvider` interface, so milestone 2
+replaces one class with one that reads Spring Security's context and no other
+file changes. The alternative considered was putting `requesterId` in the request
+body, which was rejected because it would have made the temporary arrangement
+part of the published API contract and would still not have answered the `mine`
+filter.
+
+Note that the requester is deliberately *not* a field on
+`CreateTicketRequest`: if a client could name the requester, anyone could file a
+ticket as somebody else.
+
+### Ticket numbers come from one sequence per type
+
+`INC-000123` and `REQ-000045` are allocated from two PostgreSQL sequences. The
+obvious alternative, `MAX(number) + 1`, is wrong under concurrency: two
+simultaneous inserts read the same maximum and produce the same number. A
+sequence is atomic and needs no table lock.
+
+Incidents and service requests are numbered independently, so the prefix and the
+counter agree with each other.
+
+### Filtering uses Specifications rather than a query per combination
+
+`GET /api/tickets` has seven optional filters, which is well over a hundred
+combinations. Writing a `@Query` for each is not viable, so the filters are
+composed with JPA Specifications. Everything goes through the Criteria API, which
+means every client-supplied value arrives as a bound parameter and none of it is
+concatenated into SQL.
+
+Free-text search (`q`) is a case-insensitive `LIKE` across number, title and
+description. It is a substring match, not a token match, so "projector blown"
+does not find "Projector bulb has blown" — there is a test asserting exactly
+that, so the behaviour is documented rather than accidental. PostgreSQL full-text
+search is the upgrade path if volume ever justifies it.
+
+### The list endpoint fetches its associations in one query
+
+`TicketRepository.findAll(Specification, Pageable)` is overridden purely to
+attach an `@EntityGraph` covering category, requester and assignee. Without it, a
+page of 20 tickets issues 61 queries instead of 1 — the N+1 problem. All three
+are to-one associations, so fetching them alongside does not interfere with
+pagination the way fetching a collection would.
+
+### Lists return our own page shape, not Spring's `Page`
+
+Spring Data's `PageImpl` serializes to JSON, but Spring itself warns that its
+shape is an implementation detail and unstable across versions. Returning it
+would make the public API contract depend on a library's internals, so
+`PageResponse` is declared explicitly and the API owns its own shape.
+
+### Two response DTOs, because lists do not need descriptions
+
+`TicketResponse` is the full ticket; `TicketSummaryResponse` is what appears in a
+list and omits the description, which can be 10,000 characters and is never
+rendered in a list view. A test asserts the description is absent from list
+responses so the distinction cannot quietly erode.
+
+### A deactivated category is a 400, not a 404
+
+An inactive category still exists and is still referenced by historical tickets,
+so pretending it is missing would be untrue. It simply cannot be chosen for new
+tickets, which makes it a bad request. Unknown ids are also 400 rather than 404
+here, because the thing that was not found is a field in the body, not the
+resource being addressed.
+
+### PATCH semantics: null means "leave alone"
+
+`UpdateTicketRequest` treats a null field as absent rather than as "set to null",
+which is what makes the endpoint a patch. Bean Validation cannot express
+"optional, but not blank if supplied" with `@NotBlank` (which rejects absence) or
+`@Size` (which accepts a blank string), so two `@AssertTrue` methods on the
+record cover it: one requires at least one field, the other rejects blank text in
+whichever fields were supplied.
+
+### Spring Boot 4 serializes with Jackson 3
+
+This one cost a full test run. Boot 4.1.1 pulls in `tools.jackson.core:jackson-databind:3.1.5`
+and auto-configures **Jackson 3**. Jackson 2 is still on the classpath
+transitively (YAML config parsing, and `jackson-annotations` is still the 2.x
+artifact), so `com.fasterxml.jackson.databind.ObjectMapper` compiles perfectly
+well — and then fails at runtime with `NoSuchBeanDefinitionException`, because
+the auto-configured bean is `tools.jackson.databind.ObjectMapper`.
+
+The rule: in Boot 4, Jackson *databind* types come from `tools.jackson.databind`,
+while Jackson *annotations* are still `com.fasterxml.jackson.annotation`.
+
+### Optimistic locking from the start
+
+`Ticket.version` is mapped with `@Version`, so a second concurrent write fails
+with a 409 rather than silently discarding the first. Two agents working the same
+queue is the normal case at a service desk, so this is cheaper to add now than to
+retrofit once there is data.

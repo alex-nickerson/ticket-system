@@ -3,8 +3,9 @@
 A small ServiceNow-style IT service desk: Spring Boot REST API, Angular frontend,
 PostgreSQL, deployed to Azure.
 
-Status: **milestone 0 — project setup.** The skeleton builds, tests and boots; there
-are no ticket endpoints yet.
+Status: **milestone 1 — tickets core.** The ticket API (create, list with filters,
+fetch, amend) is live and testable through Swagger UI. There is no authentication
+yet and no user interface beyond the Angular skeleton.
 
 ## Prerequisites
 
@@ -41,6 +42,27 @@ cd frontend && npm install && npm start
 | Swagger UI | http://localhost:8080/swagger-ui.html |
 | OpenAPI document | http://localhost:8080/v3/api-docs |
 | Angular app | http://localhost:4200 |
+
+### Acting as a user
+
+Authentication arrives in milestone 2. Until then every request that needs to know
+who is asking takes an `X-Acting-User` header holding one of these seeded user ids:
+
+| Id | Name | Role |
+|---|---|---|
+| 1 | Dev Requester | `REQUESTER` |
+| 2 | Dev Agent | `AGENT` |
+| 3 | Dev Admin | `ADMIN` |
+
+```bash
+curl -s localhost:8080/api/tickets -H 'X-Acting-User: 2'
+
+curl -s -X POST localhost:8080/api/tickets   -H 'X-Acting-User: 1' -H 'Content-Type: application/json'   -d '{"type":"INCIDENT","title":"Laptop will not power on",
+       "description":"No lights, no fan.","categoryId":1,"priority":"P1"}'
+```
+
+The role is not enforced anywhere yet — the header only identifies the requester
+and answers `?mine=true`.
 
 ### Inspecting the database
 
