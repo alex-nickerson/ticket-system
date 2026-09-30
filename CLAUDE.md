@@ -209,6 +209,14 @@ Angular. Specifically:
 - **On Windows, Node's winget package id can be misleading** — a 24.x install was
   registered as `OpenJS.NodeJS.22`, so `winget upgrade` on that id *downgrades* to the
   22 line. Install `OpenJS.NodeJS.LTS` explicitly instead.
+- **On Windows, WinNAT reserves shifting blocks of TCP ports**, and the block
+  frequently covers Azurite's defaults (10000/10001). `docker compose up` then fails
+  with *"An attempt was made to access a socket in a way forbidden by its access
+  permissions"* — which is not a port conflict: nothing is listening. Check with
+  `netsh interface ipv4 show excludedportrange protocol=tcp` and set
+  `AZURITE_BLOB_PORT` / `AZURITE_QUEUE_PORT` in `.env` to ports outside every listed
+  range. The ranges change after a reboot, so this can appear on a stack that worked
+  yesterday.
 
 ### Step 2: know that Spring Boot 4 is not Spring Boot 3
 
@@ -221,6 +229,7 @@ differences do not compile:
 | one `spring-boot-starter-test` | one `-test` starter per module (`spring-boot-starter-webmvc-test`, `-data-jpa-test`, `-validation-test`, `-actuator-test`, `-flyway-test`) |
 | `org.testcontainers.containers.PostgreSQLContainer<T>` (generic) | `org.testcontainers.postgresql.PostgreSQLContainer` (**not** generic — no `<>`) |
 | `...boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc` | `...boot.webmvc.test.autoconfigure.AutoConfigureMockMvc` |
+| Jackson 2: `com.fasterxml.jackson.databind.ObjectMapper` | Jackson 3: `tools.jackson.databind.ObjectMapper` (annotations stay on `com.fasterxml.jackson.annotation`) |
 
 When generated or example code fails to compile, suspect the version gap first. To
 find where a class actually lives, search the local Maven repository rather than
@@ -235,6 +244,19 @@ done
 
 `org.springframework.test.web.servlet.*` (MockMvc itself, request builders, result
 matchers) is unchanged.
+
+**Jackson is the nastiest of these, because the wrong import compiles.** Boot 4
+auto-configures Jackson 3 (`tools.jackson.core:jackson-databind`), but Jackson 2 is
+still on the classpath transitively, so `com.fasterxml.jackson.databind.ObjectMapper`
+resolves at compile time and then fails at runtime with
+`NoSuchBeanDefinitionException: No qualifying bean of type
+'com.fasterxml.jackson.databind.ObjectMapper'`. Databind types come from
+`tools.jackson.databind`; annotations are still `com.fasterxml.jackson.annotation`.
+
+**Spring Initializr's version id is not the Maven version.** The API calls the
+current release `4.1.1.RELEASE` and writes that into the generated `pom.xml`, but
+Maven Central publishes `4.1.1`. Left as generated, the first build fails with
+`Non-resolvable parent POM`. Strip the `.RELEASE` suffix.
 
 ### Step 3: Angular 22 uses Vitest, not Karma
 
