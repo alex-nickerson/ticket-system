@@ -25,6 +25,7 @@ import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -36,6 +37,11 @@ import org.springframework.test.web.servlet.MockMvc;
  * are about the HTTP contract only.
  */
 @WebMvcTest(TicketController.class)
+// The security filters are switched off here deliberately. This class is about
+// request binding, validation and the error shape; who is allowed to call what
+// is covered end to end, with real tokens, by AuthorizationMatrixTest. Mixing
+// the two would mean every validation test also had to carry a token.
+@AutoConfigureMockMvc(addFilters = false)
 class TicketControllerTest {
 
 	private static final String PROBLEM_JSON = "application/problem+json";

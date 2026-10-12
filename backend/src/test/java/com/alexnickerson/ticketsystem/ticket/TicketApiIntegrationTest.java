@@ -8,10 +8,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.alexnickerson.ticketsystem.TestcontainersConfiguration;
-import com.alexnickerson.ticketsystem.category.Category;
 import com.alexnickerson.ticketsystem.category.CategoryRepository;
-import com.alexnickerson.ticketsystem.user.HeaderActingUserProvider;
-import com.alexnickerson.ticketsystem.user.User;
+import com.alexnickerson.ticketsystem.support.DevTokens;
 import com.alexnickerson.ticketsystem.user.UserRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,17 +17,21 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Full-stack tests against a real PostgreSQL container: HTTP in, SQL out.
+ * Full-stack tests against a real PostgreSQL container: HTTP in, SQL out, with
+ * real bearer tokens minted by the dev profile's token endpoint.
  *
  * <p>These cover the things a mocked test cannot prove — that the Flyway schema
- * matches the entities, that the number sequences behave, and that the filter
- * specifications generate SQL that actually runs.
+ * matches the entities, that the number sequences behave, that the filter
+ * specifications generate SQL that actually runs, and that a token survives the
+ * whole filter chain.
  *
  * <p>Ticket numbers are asserted relatively rather than as fixed strings,
  * because the sequences are shared across every test in the class and a sequence
@@ -37,28 +39,31 @@ import tools.jackson.databind.ObjectMapper;
  */
 @SpringBootTest
 @AutoConfigureMockMvc
+@ActiveProfiles("dev")
 @Import(TestcontainersConfiguration.class)
 class TicketApiIntegrationTest {
 
 	@Autowired private MockMvc mockMvc;
+	@Autowired private ObjectMapper objectMapper;
 	@Autowired private UserRepository users;
 	@Autowired private CategoryRepository categories;
-	@Autowired private ObjectMapper objectMapper;
 
-	private long requesterId;
-	private long agentId;
+	private DevTokens devTokens;
+	private String requesterAuth;
+	private String agentAuth;
 	private long hardwareId;
 
 	@BeforeEach
-	void resolveSeededData() {
-		requesterId = seededUser("requester@example.test").getId();
-		agentId = seededUser("agent@example.test").getId();
-		hardwareId = seededCategory("Hardware").getId();
+	void resolveSeededData() throws Exception {
+		devTokens = new DevTokens(mockMvc, objectMapper, users, categories);
+		requesterAuth = devTokens.bearerForRequester();
+		agentAuth = devTokens.bearerForAgent();
+		hardwareId = devTokens.categoryId("Hardware");
 	}
 
 	@Test
 	void flywaySeededTheReferenceData() throws Exception {
-		mockMvc.perform(get("/api/categories"))
+		mockMvc.perform(get("/api/categories").header(HttpHeaders.AUTHORIZATION, requesterAuth))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.length()").value(5))
 				.andExpect(jsonPath("$[*].name").value(org.hamcrest.Matchers.hasItem("Onboarding")));
@@ -66,8 +71,8 @@ class TicketApiIntegrationTest {
 
 	@Test
 	void incidentNumbersIncrementAndAreZeroPadded() throws Exception {
-		String first = createTicket(requesterId, "INCIDENT", "First incident", "P3").get("number").asText();
-		String second = createTicket(requesterId, "INCIDENT", "Second incident", "P3").get("number").asText();
+		String first = createTicket(requesterAuth, "INCIDENT", "First incident", "P3").get("number").asText();
+		String second = createTicket(requesterAuth, "INCIDENT", "Second incident", "P3").get("number").asText();
 
 		assertThat(first).matches("INC-\\d{6}");
 		assertThat(second).matches("INC-\\d{6}");
@@ -76,7 +81,7 @@ class TicketApiIntegrationTest {
 
 	@Test
 	void serviceRequestsAreNumberedFromTheirOwnSequence() throws Exception {
-		JsonNode request = createTicket(requesterId, "SERVICE_REQUEST", "Need a monitor", "P4");
+		JsonNode request = createTicket(requesterAuth, "SERVICE_REQUEST", "Need a monitor", "P4");
 
 		assertThat(request.get("number").asText()).matches("REQ-\\d{6}");
 		assertThat(request.get("type").asText()).isEqualTo("SERVICE_REQUEST");
@@ -84,9 +89,9 @@ class TicketApiIntegrationTest {
 
 	@Test
 	void aCreatedTicketCanBeFetchedBackWithItsAssociations() throws Exception {
-		long id = createTicket(requesterId, "INCIDENT", "Fetch me back", "P2").get("id").asLong();
+		long id = createTicket(requesterAuth, "INCIDENT", "Fetch me back", "P2").get("id").asLong();
 
-		mockMvc.perform(get("/api/tickets/{id}", id).header(HeaderActingUserProvider.HEADER, requesterId))
+		mockMvc.perform(get("/api/tickets/{id}", id).header(HttpHeaders.AUTHORIZATION, requesterAuth))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.title").value("Fetch me back"))
 				.andExpect(jsonPath("$.status").value("NEW"))
@@ -99,22 +104,26 @@ class TicketApiIntegrationTest {
 	}
 
 	@Test
-	void requestsWithoutTheActingUserHeaderAreRejected() throws Exception {
-		mockMvc.perform(post("/api/tickets")
-						.contentType(MediaType.APPLICATION_JSON)
-						.content(createBody("INCIDENT", "No acting user", "P3")))
-				.andExpect(status().isBadRequest())
-				.andExpect(jsonPath("$.title").value("Acting user could not be determined"));
-	}
+	void theRequesterIsTakenFromTheTokenNotTheBody() throws Exception {
+		// The body names a different requester; it must be ignored, because the
+		// request DTO has no such field at all.
+		String body = """
+				{
+				  "type": "INCIDENT",
+				  "title": "Spoofing attempt",
+				  "description": "requesterId in the body must not be honoured.",
+				  "categoryId": %d,
+				  "priority": "P3",
+				  "requesterId": 3
+				}
+				""".formatted(hardwareId);
 
-	@Test
-	void anUnknownActingUserIsRejected() throws Exception {
 		mockMvc.perform(post("/api/tickets")
-						.header(HeaderActingUserProvider.HEADER, 999_999)
+						.header(HttpHeaders.AUTHORIZATION, requesterAuth)
 						.contentType(MediaType.APPLICATION_JSON)
-						.content(createBody("INCIDENT", "Ghost user", "P3")))
-				.andExpect(status().isBadRequest())
-				.andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers.containsString("999999")));
+						.content(body))
+				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$.requester.email").value("requester@example.test"));
 	}
 
 	@Test
@@ -130,7 +139,7 @@ class TicketApiIntegrationTest {
 				""";
 
 		mockMvc.perform(post("/api/tickets")
-						.header(HeaderActingUserProvider.HEADER, requesterId)
+						.header(HttpHeaders.AUTHORIZATION, requesterAuth)
 						.contentType(MediaType.APPLICATION_JSON)
 						.content(body))
 				.andExpect(status().isBadRequest())
@@ -139,11 +148,11 @@ class TicketApiIntegrationTest {
 
 	@Test
 	void theMineFilterOnlyReturnsTheActingUsersTickets() throws Exception {
-		createTicket(requesterId, "INCIDENT", "Raised by the requester", "P3");
-		createTicket(agentId, "INCIDENT", "Raised by the agent", "P3");
+		createTicket(requesterAuth, "INCIDENT", "Raised by the requester", "P3");
+		createTicket(agentAuth, "INCIDENT", "Raised by the agent", "P3");
 
 		mockMvc.perform(get("/api/tickets")
-						.header(HeaderActingUserProvider.HEADER, agentId)
+						.header(HttpHeaders.AUTHORIZATION, agentAuth)
 						.param("mine", "true")
 						.param("size", "100"))
 				.andExpect(status().isOk())
@@ -153,17 +162,17 @@ class TicketApiIntegrationTest {
 
 	@Test
 	void freeTextSearchIsACaseInsensitiveSubstringMatchNotATokenMatch() throws Exception {
-		createTicket(requesterId, "INCIDENT", "Projector bulb has blown", "P4");
+		createTicket(requesterAuth, "INCIDENT", "Projector bulb has blown", "P4");
 
 		mockMvc.perform(get("/api/tickets")
-						.header(HeaderActingUserProvider.HEADER, requesterId)
+						.header(HttpHeaders.AUTHORIZATION, agentAuth)
 						.param("q", "projector blown")
 						.param("size", "100"))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.totalElements").value(0));
 
 		mockMvc.perform(get("/api/tickets")
-						.header(HeaderActingUserProvider.HEADER, requesterId)
+						.header(HttpHeaders.AUTHORIZATION, agentAuth)
 						.param("q", "PROJECTOR")
 						.param("size", "100"))
 				.andExpect(status().isOk())
@@ -173,11 +182,11 @@ class TicketApiIntegrationTest {
 
 	@Test
 	void freeTextSearchAlsoMatchesTheTicketNumber() throws Exception {
-		String number = createTicket(requesterId, "INCIDENT", "Findable by number", "P3")
+		String number = createTicket(requesterAuth, "INCIDENT", "Findable by number", "P3")
 				.get("number").asText();
 
 		mockMvc.perform(get("/api/tickets")
-						.header(HeaderActingUserProvider.HEADER, requesterId)
+						.header(HttpHeaders.AUTHORIZATION, agentAuth)
 						.param("q", number.toLowerCase())
 						.param("size", "100"))
 				.andExpect(status().isOk())
@@ -186,10 +195,10 @@ class TicketApiIntegrationTest {
 
 	@Test
 	void filtersCombineWithAnd() throws Exception {
-		createTicket(requesterId, "INCIDENT", "A P1 incident", "P1");
+		createTicket(requesterAuth, "INCIDENT", "A P1 incident", "P1");
 
 		mockMvc.perform(get("/api/tickets")
-						.header(HeaderActingUserProvider.HEADER, requesterId)
+						.header(HttpHeaders.AUTHORIZATION, agentAuth)
 						.param("status", "NEW")
 						.param("priority", "P1")
 						.param("size", "100"))
@@ -199,7 +208,7 @@ class TicketApiIntegrationTest {
 
 		// No ticket is RESOLVED in this milestone, so this must come back empty.
 		mockMvc.perform(get("/api/tickets")
-						.header(HeaderActingUserProvider.HEADER, requesterId)
+						.header(HttpHeaders.AUTHORIZATION, agentAuth)
 						.param("status", "RESOLVED")
 						.param("priority", "P1"))
 				.andExpect(status().isOk())
@@ -208,11 +217,11 @@ class TicketApiIntegrationTest {
 
 	@Test
 	void listIsPaginatedAndDefaultsToNewestFirst() throws Exception {
-		createTicket(requesterId, "INCIDENT", "Older ticket", "P3");
-		createTicket(requesterId, "INCIDENT", "Newer ticket", "P3");
+		createTicket(requesterAuth, "INCIDENT", "Older ticket", "P3");
+		createTicket(requesterAuth, "INCIDENT", "Newer ticket", "P3");
 
 		String body = mockMvc.perform(get("/api/tickets")
-						.header(HeaderActingUserProvider.HEADER, requesterId)
+						.header(HttpHeaders.AUTHORIZATION, agentAuth)
 						.param("page", "0")
 						.param("size", "1"))
 				.andExpect(status().isOk())
@@ -229,11 +238,11 @@ class TicketApiIntegrationTest {
 
 	@Test
 	void patchPersistsTheChangeAndBumpsTheVersion() throws Exception {
-		long id = createTicket(requesterId, "INCIDENT", "Before the edit", "P4").get("id").asLong();
-		long softwareId = seededCategory("Software").getId();
+		long id = createTicket(requesterAuth, "INCIDENT", "Before the edit", "P4").get("id").asLong();
+		long softwareId = devTokens.categoryId("Software");
 
 		mockMvc.perform(patch("/api/tickets/{id}", id)
-						.header(HeaderActingUserProvider.HEADER, agentId)
+						.header(HttpHeaders.AUTHORIZATION, agentAuth)
 						.contentType(MediaType.APPLICATION_JSON)
 						.content("""
 								{ "title": "After the edit", "priority": "P1", "categoryId": %d }
@@ -247,7 +256,7 @@ class TicketApiIntegrationTest {
 				.andExpect(jsonPath("$.version").value(1));
 
 		// Re-read to prove it was written rather than merely echoed back.
-		mockMvc.perform(get("/api/tickets/{id}", id).header(HeaderActingUserProvider.HEADER, agentId))
+		mockMvc.perform(get("/api/tickets/{id}", id).header(HttpHeaders.AUTHORIZATION, agentAuth))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.title").value("After the edit"))
 				.andExpect(jsonPath("$.version").value(1));
@@ -255,10 +264,10 @@ class TicketApiIntegrationTest {
 
 	// --- helpers ---
 
-	private JsonNode createTicket(long actingUserId, String type, String title, String priority)
+	private JsonNode createTicket(String authorization, String type, String title, String priority)
 			throws Exception {
 		String response = mockMvc.perform(post("/api/tickets")
-						.header(HeaderActingUserProvider.HEADER, actingUserId)
+						.header(HttpHeaders.AUTHORIZATION, authorization)
 						.contentType(MediaType.APPLICATION_JSON)
 						.content(createBody(type, title, priority)))
 				.andExpect(status().isCreated())
@@ -282,16 +291,5 @@ class TicketApiIntegrationTest {
 
 	private static long sequenceValueOf(String ticketNumber) {
 		return Long.parseLong(ticketNumber.substring(ticketNumber.indexOf('-') + 1));
-	}
-
-	private User seededUser(String email) {
-		return users.findByEmail(email).orElseThrow(() -> new IllegalStateException("Missing seed user " + email));
-	}
-
-	private Category seededCategory(String name) {
-		return categories.findByActiveTrueOrderByNameAsc().stream()
-				.filter(category -> category.getName().equals(name))
-				.findFirst()
-				.orElseThrow(() -> new IllegalStateException("Missing seed category " + name));
 	}
 }

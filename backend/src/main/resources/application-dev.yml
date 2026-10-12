@@ -1,0 +1,25 @@
+# Development profile: local JWTs for the seeded users, so the API can be worked
+# on offline without Microsoft Entra ID.
+#
+# This profile is NOT active by default. Running with no profile leaves the API
+# with no usable token issuer, so nothing is reachable. That is deliberate: the
+# insecure path has to be asked for, it cannot be reached by forgetting to set
+# something. Run it with:
+#
+#   ./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
+
+app:
+  dev-auth:
+    # HMAC signing key for locally minted tokens. This is a development
+    # placeholder, not a secret: it only ever signs tokens for fake users on a
+    # developer's machine, and the prod profile does not use it at all. Override
+    # it with DEV_AUTH_SECRET if you would rather it were not in the repository.
+    #
+    # Must be at least 32 bytes for HS256.
+    secret: ${DEV_AUTH_SECRET:dev-only-placeholder-signing-key-not-a-secret}
+    issuer: ticket-system-dev
+    token-validity: PT1H
+
+logging:
+  level:
+    org.springframework.security: INFO
