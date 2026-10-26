@@ -25,4 +25,16 @@ public record TicketFilter(
 		Boolean mine,
 
 		@Schema(description = "Free-text search across ticket number, title and description")
-		String q) {}
+		String q) {
+
+	/**
+	 * The same filter, forced to the acting user's own tickets.
+	 *
+	 * <p>Used for requesters, who may only ever list what they raised. Every other
+	 * filter is kept, so a requester can still narrow by status or search text —
+	 * they just cannot widen the set.
+	 */
+	public TicketFilter restrictedToOwnTickets() {
+		return new TicketFilter(status, priority, assignee, category, slaState, true, q);
+	}
+}

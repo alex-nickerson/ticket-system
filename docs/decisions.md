@@ -232,3 +232,140 @@ while Jackson *annotations* are still `com.fasterxml.jackson.annotation`.
 with a 409 rather than silently discarding the first. Two agents working the same
 queue is the normal case at a service desk, so this is cheaper to add now than to
 retrofit once there is data.
+
+## Milestone 2 — auth and roles
+
+### The API is a resource server, not a login form
+
+The backend validates a bearer token on every request and keeps no session.
+Nothing is stored server-side between requests, which is what makes it possible
+to run several instances behind a load balancer later without sharing session
+state.
+
+This shape was chosen now, with locally minted tokens, precisely because it is
+the shape Entra ID needs in milestone 7. The token issuer changes then; the
+filter chain, the roles claim and every authorization rule do not.
+
+### Dev authentication is opt-in, never the default
+
+The dev profile mints its own tokens, so anyone who can reach
+`POST /api/dev/token` can become any user. That is acceptable on a developer's
+machine and catastrophic anywhere else, so it is reachable only when the dev
+profile is explicitly active:
+
+```bash
+./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
+```
+
+Making `dev` the default profile was considered and rejected. It is friendlier,
+but it means a deployment that forgets to set `SPRING_PROFILES_ACTIVE=prod`
+silently accepts tokens anyone can mint. The failure mode now is "nothing works",
+which someone notices in seconds, rather than "everyone is an admin", which
+nobody notices at all.
+
+With no profile active, `LockedDownJwtDecoder` is the `JwtDecoder`. It exists
+because a resource server needs one of those beans or the application will not
+start at all, and "fails to boot" is a worse outcome than "refuses every
+request". `LockedDownWithoutDevProfileTest` asserts this directly: the context
+loads, the token endpoint 404s, and no token can be made to work.
+
+### Why a misconfigured server answers 500 rather than 401
+
+Spring Security distinguishes two failures, and the distinction is worth keeping:
+
+- A client presenting a bad, expired or unsigned token gets **401**.
+- A server that cannot verify *any* token, because no issuer is configured, gets
+  a **500**. `AuthenticationEntryPointFailureHandler` deliberately rethrows
+  `AuthenticationServiceException` instead of reporting it as 401.
+
+Disguising the second as 401 was tempting — it reads as "more locked down" — but
+it would send every user off to debug their own credentials while the actual
+fault was a missing environment variable. A loud 500 is the more useful signal,
+and no ticket data is served either way, so nothing is gained by hiding it.
+
+### Tokens say who you are; the database says what you may do
+
+The token carries a `uid` claim and a `roles` claim, but
+`SecurityContextActingUserProvider` looks the user up and reads the role and
+active flag from the database rather than trusting the token's copy.
+
+The reason is revocation. A token is valid until it expires, so a role taken away
+or an account deactivated would otherwise keep working for up to an hour. Reading
+authorization state from the database costs one indexed primary-key lookup per
+request and makes the change effective immediately.
+
+### The roles claim matches Entra ID's shape
+
+Roles arrive as a JSON array under a claim called `roles`, which is what Entra ID
+app roles look like, and `JwtGrantedAuthoritiesConverter` maps them to
+`ROLE_`-prefixed authorities. A user only ever holds one role in this
+application, but the claim is still an array so that milestone 7 does not have to
+reshape it.
+
+### Replacing the acting-user header was a one-file change
+
+Milestone 1 read an `X-Acting-User` header behind an `ActingUserProvider`
+interface. Milestone 2 deleted that implementation and added one that reads the
+security context. No service, controller or test of the ticket rules changed as a
+result. That is the entire argument for having put the interface there in the
+first place, and it is worth remembering next time something temporary needs to
+go in.
+
+### A requester gets 404, not 403, for someone else's ticket
+
+Answering 403 confirms that a ticket with that id exists. Walking the ids would
+then reveal how many tickets the service desk handles and, combined with other
+responses, whose they are. A resource you may not see is indistinguishable from
+one that does not exist.
+
+The order of the checks matters for the same reason: `requireCanUpdate` checks
+read access *first*, so a requester patching someone else's ticket gets 404 even
+when the patch is also something they would not be allowed to do. There is a test
+for that specific ordering, because it is easy to reintroduce by rearranging two
+lines.
+
+### A requester's list is narrowed in the query, not filtered afterwards
+
+`TicketFilter.restrictedToOwnTickets()` forces the filter before the query runs,
+so `?mine=false` cannot widen it. Filtering the results after the fact would have
+left `totalElements` and `totalPages` describing the whole service desk, which
+leaks the overall volume and produces a pager with empty pages.
+
+### A requester can reword their own ticket but not escalate it
+
+The spec says `PATCH` is "role-dependent" without saying how. The split chosen is
+title and description for the requester; category and priority for agents only.
+
+A requester who could set their own priority to P1 would make the SLA reporting
+in milestone 3 meaningless — everything would be critical. Triage is the service
+desk's job. Keeping the requester able to fix their own typo, though, avoids the
+silly situation where correcting a misspelled title needs an agent.
+
+### Authorization is tested against the real stack
+
+`AuthorizationMatrixTest` runs every endpoint against anonymous, requester, agent
+and admin, with real minted tokens, the real filter chain and a real database. It
+is the one test in the project where mocking anything would defeat the purpose: a
+suite that mocked the security layer could pass while the deployed application
+served every ticket to anyone.
+
+The same reasoning applies to how tests get their tokens. `DevTokens` calls the
+application's own `POST /api/dev/token` rather than forging tokens with a
+test-only signing helper, so the signature, the decoder and the claim mapping are
+exercised on every run instead of being bypassed.
+
+### CORS lists origins explicitly
+
+The allowed origin is configuration (`app.cors.allowed-origins`, defaulting to
+the Angular dev server) and never `*`. A wildcard cannot be combined with
+credentials, and allowing any origin would let any site in a user's browser call
+the API with their token.
+
+### The two security handlers set their own charset
+
+`ProblemDetailAuthenticationEntryPoint` and `ProblemDetailAccessDeniedHandler`
+write the response body themselves rather than going through Spring's message
+converters, so they have to set UTF-8 explicitly — the servlet default is
+ISO-8859-1, which mangles any non-ASCII text in a problem detail. This was caught
+by looking at the `Content-Type` header of a real 401 rather than by a test, and
+there is now an assertion for it.

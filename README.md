@@ -3,9 +3,10 @@
 A small ServiceNow-style IT service desk: Spring Boot REST API, Angular frontend,
 PostgreSQL, deployed to Azure.
 
-Status: **milestone 1 — tickets core.** The ticket API (create, list with filters,
-fetch, amend) is live and testable through Swagger UI. There is no authentication
-yet and no user interface beyond the Angular skeleton.
+Status: **milestone 2 — auth and roles.** The ticket API is behind bearer-token
+authentication with Requester, Agent and Admin roles enforced on the server. Sign-in
+through Microsoft Entra ID comes later; for now the dev profile issues local tokens.
+There is no user interface yet beyond the Angular skeleton.
 
 ## Prerequisites
 
@@ -28,7 +29,9 @@ docker compose up -d
 docker compose ps            # wait for ticket-postgres to report "healthy"
 
 # 3. API — http://localhost:8080
-cd backend && ./mvnw spring-boot:run
+#    The dev profile is required: it is what issues local tokens. Without it the
+#    API starts but nothing is reachable.
+cd backend && ./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
 
 # 4. Frontend — http://localhost:4200
 cd frontend && npm install && npm start
@@ -43,26 +46,41 @@ cd frontend && npm install && npm start
 | OpenAPI document | http://localhost:8080/v3/api-docs |
 | Angular app | http://localhost:4200 |
 
-### Acting as a user
+### Signing in
 
-Authentication arrives in milestone 2. Until then every request that needs to know
-who is asking takes an `X-Acting-User` header holding one of these seeded user ids:
+Every `/api` endpoint needs a bearer token. Under the dev profile you mint one for a
+seeded user; there are no passwords, and the endpoint does not exist in any other
+profile.
 
-| Id | Name | Role |
-|---|---|---|
-| 1 | Dev Requester | `REQUESTER` |
-| 2 | Dev Agent | `AGENT` |
-| 3 | Dev Admin | `ADMIN` |
+| Id | Name | Role | Can do |
+|---|---|---|---|
+| 1 | Dev Requester | `REQUESTER` | Raise tickets; see and reword only their own |
+| 2 | Dev Agent | `AGENT` | Everything on all tickets; change category and priority |
+| 3 | Dev Admin | `ADMIN` | Everything an agent can, plus administration later |
 
 ```bash
-curl -s localhost:8080/api/tickets -H 'X-Acting-User: 2'
+# Mint a token for the agent
+TOKEN=$(curl -s -X POST localhost:8080/api/dev/token   -H 'Content-Type: application/json' -d '{"userId": 2}'   | python -c 'import json,sys; print(json.load(sys.stdin)["token"])')
 
-curl -s -X POST localhost:8080/api/tickets   -H 'X-Acting-User: 1' -H 'Content-Type: application/json'   -d '{"type":"INCIDENT","title":"Laptop will not power on",
-       "description":"No lights, no fan.","categoryId":1,"priority":"P1"}'
+# Use it
+curl -s localhost:8080/api/me -H "Authorization: Bearer $TOKEN"
+curl -s localhost:8080/api/tickets -H "Authorization: Bearer $TOKEN"
 ```
 
-The role is not enforced anywhere yet — the header only identifies the requester
-and answers `?mine=true`.
+In Swagger UI, press **Authorize** and paste the token to try endpoints from the page.
+
+Tokens last an hour. The signing key is a development placeholder in
+`application-dev.yml`; override it with `DEV_AUTH_SECRET` if you would rather it were
+not in the repository.
+
+What the roles actually mean on the server:
+
+- A requester asking for someone else's ticket gets **404, not 403** — a 403 would
+  confirm the ticket exists.
+- A requester's ticket list is always scoped to their own tickets, and `?mine=false`
+  cannot widen it.
+- A requester can change the title and description of their own ticket. Category and
+  priority need an agent, so nobody can escalate their own ticket to P1.
 
 ### Inspecting the database
 

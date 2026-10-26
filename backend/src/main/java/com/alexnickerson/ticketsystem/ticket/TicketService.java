@@ -33,6 +33,7 @@ public class TicketService {
 	private final CategoryRepository categories;
 	private final TicketNumberGenerator numberGenerator;
 	private final ActingUserProvider actingUserProvider;
+	private final TicketAccessPolicy accessPolicy;
 	private final Clock clock;
 
 	public TicketService(
@@ -40,11 +41,13 @@ public class TicketService {
 			CategoryRepository categories,
 			TicketNumberGenerator numberGenerator,
 			ActingUserProvider actingUserProvider,
+			TicketAccessPolicy accessPolicy,
 			Clock clock) {
 		this.tickets = tickets;
 		this.categories = categories;
 		this.numberGenerator = numberGenerator;
 		this.actingUserProvider = actingUserProvider;
+		this.accessPolicy = accessPolicy;
 		this.clock = clock;
 	}
 
@@ -70,19 +73,31 @@ public class TicketService {
 	public TicketResponse get(Long id) {
 		Ticket ticket = tickets.findByIdWithAssociations(id)
 				.orElseThrow(() -> new NotFoundException("Ticket", id));
+		accessPolicy.requireCanRead(actingUserProvider.current(), ticket);
 		return TicketResponse.from(ticket);
 	}
 
 	@Transactional(readOnly = true)
 	public PageResponse<TicketSummaryResponse> list(TicketFilter filter, Pageable pageable) {
-		// The acting user is only needed for ?mine=true, but resolving it here keeps
-		// the specification builder free of any notion of who is asking.
-		Long actingUserId = Boolean.TRUE.equals(filter.mine())
-				? actingUserProvider.current().getId()
-				: null;
+		User actingUser = actingUserProvider.current();
+
+		/*
+		 * A requester's list is restricted to their own tickets whatever they ask
+		 * for, so ?mine=false cannot widen it. Agents and admins see everything
+		 * unless they opt into ?mine=true.
+		 *
+		 * Enforcing this by narrowing the query, rather than by filtering results
+		 * afterwards, keeps the pagination totals honest: a requester with three
+		 * tickets sees totalElements = 3, not the whole desk's count.
+		 */
+		TicketFilter effectiveFilter = accessPolicy.canSeeAllTickets(actingUser)
+				? filter
+				: filter.restrictedToOwnTickets();
+
+		Long actingUserId = Boolean.TRUE.equals(effectiveFilter.mine()) ? actingUser.getId() : null;
 
 		return PageResponse.from(
-				tickets.findAll(TicketSpecifications.matching(filter, actingUserId), pageable),
+				tickets.findAll(TicketSpecifications.matching(effectiveFilter, actingUserId), pageable),
 				TicketSummaryResponse::from);
 	}
 
@@ -90,6 +105,8 @@ public class TicketService {
 	public TicketResponse update(Long id, UpdateTicketRequest request) {
 		Ticket ticket = tickets.findByIdWithAssociations(id)
 				.orElseThrow(() -> new NotFoundException("Ticket", id));
+
+		accessPolicy.requireCanUpdate(actingUserProvider.current(), ticket, request);
 
 		// A null field means "not supplied", so each change is applied only when
 		// the client actually sent it.

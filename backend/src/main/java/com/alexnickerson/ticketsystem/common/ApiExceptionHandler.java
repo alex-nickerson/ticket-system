@@ -63,6 +63,15 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 		return problem;
 	}
 
+	@ExceptionHandler(ForbiddenException.class)
+	ProblemDetail handleForbidden(ForbiddenException ex) {
+		ProblemDetail problem = ProblemDetail.forStatus(HttpStatus.FORBIDDEN);
+		problem.setType(URI.create(TYPE_PREFIX + "forbidden"));
+		problem.setTitle("Not permitted");
+		problem.setDetail(ex.getMessage());
+		return problem;
+	}
+
 	@ExceptionHandler(NotFoundException.class)
 	ProblemDetail handleNotFound(NotFoundException ex) {
 		ProblemDetail problem = ProblemDetail.forStatus(HttpStatus.NOT_FOUND);
